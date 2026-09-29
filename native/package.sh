@@ -7,15 +7,10 @@ STAGING="$(mktemp -d "$(pwd)/work/source-package.XXXXXX")"
 SOURCE="$STAGING/SimpleBoard"
 mkdir -p "$SOURCE"
 # Explicit allowlist: no git history, hosting data, caches, logs or credentials.
-cp README.md CHANGELOG.md .gitignore "$SOURCE/"
+cp README.md CHANGELOG.md LICENSE .gitignore "$SOURCE/"
 ditto --norsrc native "$SOURCE/native"
 ditto --norsrc assets "$SOURCE/assets"
 ditto --norsrc docs "$SOURCE/docs"
-if [ -f LICENSE ]; then
-  cp LICENSE "$SOURCE/LICENSE"
-else
-  echo "NOTICE: License is not selected. Do not publish as open source yet."
-fi
 ditto -c -k --norsrc --keepParent "$SOURCE" "outputs/SimpleBoard-v$VERSION-source.zip"
 cp "outputs/简笔白板-macOS.zip" "outputs/SimpleBoard-v$VERSION-macOS-arm64.zip"
 cp "outputs/SimpleBoard-v$VERSION-source.zip" "outputs/简笔白板-源码.zip"

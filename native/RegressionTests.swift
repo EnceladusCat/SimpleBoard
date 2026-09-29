@@ -6,6 +6,7 @@ private final class ActionCounter: NSObject {
 }
 
 func runRegressionTests() {
+    setbuf(stdout, nil)
     let icon = NSImage(contentsOfFile: "assets/AppIcon.icns")
     precondition(icon?.isValid == true, "The bundled application icon must decode on macOS")
     let artwork = NSBitmapImageRep(data: try! Data(contentsOf: URL(fileURLWithPath: "assets/AppIcon.png")))!
@@ -16,6 +17,16 @@ func runRegressionTests() {
     let delegate = AppDelegate()
     delegate.canvas = Canvas(frame: NSRect(x: 0, y: 0, width: 640, height: 400))
     delegate.makePalette(visibleFrame: NSRect(x: 0, y: 0, width: 1280, height: 800))
+    delegate.drawingWindow = DrawingWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 400),
+                                            styleMask: [.borderless], backing: .buffered, defer: false)
+    for whiteboard in [true, false, true, false, true] {
+        delegate.canvas.whiteboard = whiteboard
+        delegate.updateWindowLevels()
+        precondition(delegate.palette.level.rawValue > delegate.drawingWindow.level.rawValue)
+        precondition(delegate.drawingWindow.level == (whiteboard ? .normal : .floating))
+    }
+    precondition(delegate.styleButton.caption == "样式和工具" && delegate.styleButton.keyHint.isEmpty)
+    print("PASS: toolbar stays at a higher window level in whiteboard and transparent modes")
     let root = delegate.palette.contentView!
     root.layoutSubtreeIfNeeded()
 
@@ -118,4 +129,97 @@ func runRegressionTests() {
         }
     }
     print("PASS: pointer, clear/undo/redo and 200 white/transparent canvas renders")
+
+    let pureBlue = NSColor(srgbRed: 0, green: 0, blue: 1, alpha: 1)
+    delegate.setStrokeColor(pureBlue)
+    precondition(RGBValue(canvas.strokeColor)!.text == "rgb(0, 0, 255)")
+    canvas.tool = .pen
+    canvas.mouseDown(with: mouse)
+    canvas.mouseUp(with: mouse)
+    precondition(RGBValue(canvas.marks.last!.color)!.hex == "#0000FF")
+    let oldMark = canvas.marks.last!
+    delegate.strokeRGBFields[0].stringValue = "256"
+    delegate.applyRGB()
+    precondition(RGBValue(canvas.strokeColor)!.hex == "#0000FF", "Invalid RGB must not change color")
+    delegate.strokeRGBFields[0].stringValue = "255"
+    delegate.strokeRGBFields[1].stringValue = "128"
+    delegate.strokeRGBFields[2].stringValue = "0"
+    delegate.applyRGB()
+    precondition(RGBValue(canvas.strokeColor)!.text == "rgb(255, 128, 0)")
+    precondition(RGBValue(oldMark.color)!.hex == "#0000FF", "Existing strokes retain their color")
+    canvas.beginText(at: CGPoint(x: 30, y: 30))
+    canvas.editor!.string = "颜色测试"
+    canvas.commitText()
+    precondition(RGBValue(canvas.marks.last!.color) == RGBValue(canvas.red), "Text stays red")
+    precondition(delegate.recordSample(NSColor(srgbRed: 0.5, green: 1, blue: 0, alpha: 1)))
+    precondition(delegate.sampledRGB!.text == "rgb(128, 255, 0)")
+    let previousSample = delegate.sampledRGB
+    precondition(!delegate.recordSample(nil) && delegate.sampledRGB == previousSample)
+    delegate.useSampleColor()
+    precondition(RGBValue(canvas.strokeColor) == previousSample)
+    precondition(delegate.copyRGBItem.isEnabled && delegate.useSampleItem.isEnabled)
+    precondition(RGBValue(NSColor(white: 0.5, alpha: 1)) != nil)
+    print("PASS: RGB color input, invalid values, immutable strokes, red text, sampling/cancel and use-color")
+
+    let m1 = PixelMeasurement(start: .zero, end: CGPoint(x: 3, y: 4), scale: 1)
+    let m2 = PixelMeasurement(start: CGPoint(x: 3, y: 4), end: .zero, scale: 2)
+    precondition(m1.distance == 5 && m2.distance == 10 && m2.dx == 6 && m2.dy == 8)
+    canvas.tool = .ruler
+    let historyCount = canvas.undoSteps.count
+    let marksCount = canvas.marks.count
+    canvas.mouseDown(with: mouse)
+    let measurementStart = canvas.measurement!.start
+    canvas.updateMeasurement(to: CGPoint(x: measurementStart.x + 3, y: measurementStart.y + 4))
+    precondition(canvas.measurement!.distance == 5)
+    canvas.mouseUp(with: mouse)
+    precondition(!canvas.measuring && canvas.measurement != nil)
+    precondition(canvas.marks.count == marksCount && canvas.undoSteps.count == historyCount)
+    let rulerBitmap = canvas.bitmapImageRepForCachingDisplay(in: canvas.bounds)!
+    canvas.cacheDisplay(in: canvas.bounds, to: rulerBitmap)
+    canvas.tool = .pen
+    precondition(canvas.measurement == nil)
+    canvas.tool = .ruler
+    canvas.mouseDown(with: mouse)
+    canvas.clear()
+    precondition(canvas.measurement == nil && !canvas.measuring)
+    print("PASS: 1x/2x pixel distances, reversed drag, ruler rendering, no undo pollution and cleanup")
+
+    delegate.setStrokeColor(canvas.red)
+    let toolsRoot = delegate.stylePopover.contentViewController!.view
+    toolsRoot.layoutSubtreeIfNeeded()
+    precondition(delegate.advancedBody.isHidden && delegate.toolsBody.isHidden)
+    precondition(toolsRoot.bounds.height < 370, "Default panel must be compact")
+    let compactHeight = toolsRoot.bounds.height
+    let compactBitmap = toolsRoot.bitmapImageRepForCachingDisplay(in: toolsRoot.bounds)!
+    toolsRoot.cacheDisplay(in: toolsRoot.bounds, to: compactBitmap)
+    try! compactBitmap.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: "work/tools-1.6-compact.png"))
+    delegate.toggleAdvanced()
+    delegate.toggleTools()
+    precondition(!delegate.advancedBody.isHidden && !delegate.toolsBody.isHidden)
+    precondition(toolsRoot.bounds.height > compactHeight)
+    delegate.hexField.stringValue = "#3366cc"
+    delegate.applyHex()
+    precondition(RGBValue(canvas.strokeColor)!.text == "rgb(51, 102, 204)")
+    delegate.hexField.stringValue = "#12#456"
+    delegate.applyHex()
+    precondition(RGBValue(canvas.strokeColor)!.hex == "#3366CC" && !delegate.colorMessage.isHidden)
+    delegate.widthSlider.doubleValue = 7.7
+    delegate.changeWidthSlider(delegate.widthSlider)
+    precondition(canvas.lineWidth == 8 && delegate.strokePreview.width == 8)
+    for view in descendants(toolsRoot) where view is NSControl && !view.isHiddenOrHasHiddenAncestor {
+        let rect = view.convert(view.bounds, to: toolsRoot)
+        precondition(rect.minY >= -1 && rect.maxY <= toolsRoot.bounds.height + 1,
+                     "Tool controls must fit inside the panel")
+    }
+    let toolsBitmap = toolsRoot.bitmapImageRepForCachingDisplay(in: toolsRoot.bounds)!
+    toolsRoot.cacheDisplay(in: toolsRoot.bounds, to: toolsBitmap)
+    try! toolsBitmap.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: "work/tools-1.6-expanded.png"))
+    print("PASS: collapsed \(Int(compactHeight))pt panel, disclosures, HEX validation and stroke preview")
+
+    let source = try! String(contentsOfFile: "native/main.swift", encoding: .utf8)
+    precondition(source.contains("colorSampler.show"))
+    for forbidden in ["CGRequestScreenCaptureAccess", "CGPreflightScreenCaptureAccess", "ScreenCaptureKit"] {
+        precondition(!source.contains(forbidden), "Native sampling must not request capture access")
+    }
+    print("PASS: native color sampler retained; no screen-capture permission request")
 }

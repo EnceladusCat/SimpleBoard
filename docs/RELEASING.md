@@ -2,9 +2,9 @@
 
 ## 发布前
 
-1. 确定版权署名与许可证，将正式许可放入仓库根目录 `LICENSE` 并更新 README。
+1. 保留根目录的 MIT `LICENSE`（Copyright (c) 2026 MeowFTG），确认源码包和应用资源中均包含许可证。
 2. 在 `native/Info.plist` 更新版本和构建号，补充 `CHANGELOG.md`。
-3. 运行 `bash native/test.sh`，并手动检查透明模式点击穿透、文字输入、C 清空、⌘Z 恢复、X 退出。
+3. 运行 `bash native/test.sh`；手动检查面板折叠 / 帮助、色盘 / RGB / HEX、直尺、面板层级及快捷键。吸色需验收系统放大镜、单击后 RGB、Esc 取消后保留旧结果及画布恢复；不得引入录屏权限申请。
 4. 运行 `bash native/package.sh`，检查包内文件与校验和。
 
 ## 新建仓库

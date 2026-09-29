@@ -1,11 +1,38 @@
 import AppKit
 
-// All drawings are session-local. No screenshots, files, or network are read.
+// Drawings are session-local. Screen color selection is handled by macOS.
 enum Tool: Int, CaseIterable {
-    case pen, line, rectangle, text, pointer
-    var title: String { ["画笔", "直线", "方形", "文字", "选择 / 操作"][rawValue] }
-    var symbol: String { ["pencil.tip", "line.diagonal", "rectangle", "textformat", "cursorarrow"][rawValue] }
-    var shortcut: String { ["A", "Q", "W", "T", "V"][rawValue] }
+    case pen, line, rectangle, text, pointer, ruler
+    var title: String { ["画笔", "直线", "方形", "文字", "选择 / 操作", "像素直尺"][rawValue] }
+    var symbol: String { ["pencil.tip", "line.diagonal", "rectangle", "textformat", "cursorarrow", "ruler"][rawValue] }
+    var shortcut: String { ["A", "Q", "W", "T", "V", ""][rawValue] }
+}
+
+struct RGBValue: Equatable {
+    let r: Int
+    let g: Int
+    let b: Int
+    init?(_ color: NSColor) {
+        guard let rgb = color.usingColorSpace(.sRGB) else { return nil }
+        r = Int((min(1, max(0, rgb.redComponent)) * 255).rounded())
+        g = Int((min(1, max(0, rgb.greenComponent)) * 255).rounded())
+        b = Int((min(1, max(0, rgb.blueComponent)) * 255).rounded())
+    }
+    var text: String { "rgb(\(r), \(g), \(b))" }
+    var hex: String { String(format: "#%02X%02X%02X", r, g, b) }
+}
+
+struct PixelMeasurement {
+    var start: CGPoint
+    var end: CGPoint
+    var scale: CGFloat
+    var dx: CGFloat { abs(end.x - start.x) * scale }
+    var dy: CGFloat { abs(end.y - start.y) * scale }
+    var distance: CGFloat { hypot(dx, dy) }
+    var text: String {
+        String(format: "%.1f px  ·  ΔX %.1f  ΔY %.1f\n%.1f pt · %.0f× 渲染像素", Double(distance),
+               Double(dx), Double(dy), Double(distance / scale), Double(scale))
+    }
 }
 
 struct Mark {
@@ -97,7 +124,13 @@ final class PaletteButton: NSButton {
     }
 
     var caption = "" { didSet { captionLabel.stringValue = caption } }
-    var keyHint = "" { didSet { hintLabel.stringValue = keyHint } }
+    var keyHint = "" {
+        didSet {
+            hintLabel.stringValue = keyHint
+            hintWidth?.constant = keyHint.isEmpty ? 0 : 38
+        }
+    }
+    private var hintWidth: NSLayoutConstraint?
     var symbolName = "" {
         didSet {
             symbolView.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil)?
@@ -131,6 +164,7 @@ final class PaletteButton: NSButton {
             addSubview(view)
             view.centerYAnchor.constraint(equalTo: centerYAnchor).isActive = true
         }
+        hintWidth = hintLabel.widthAnchor.constraint(equalToConstant: keyHint.isEmpty ? 0 : 38)
         NSLayoutConstraint.activate([
             symbolView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
             symbolView.widthAnchor.constraint(equalToConstant: 16),
@@ -138,7 +172,7 @@ final class PaletteButton: NSButton {
             captionLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 32),
             captionLabel.trailingAnchor.constraint(lessThanOrEqualTo: hintLabel.leadingAnchor, constant: -2),
             hintLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
-            hintLabel.widthAnchor.constraint(equalToConstant: 38)
+            hintWidth!
         ])
         updateAppearance()
     }
@@ -185,10 +219,20 @@ final class TextEditor: NSTextView {
 }
 
 final class Canvas: NSView {
-    var tool: Tool = .pen { didSet { window?.invalidateCursorRects(for: self) } }
+    var tool: Tool = .pen {
+        didSet {
+            window?.invalidateCursorRects(for: self)
+            if oldValue != tool { draft = nil; clearMeasurement() }
+        }
+    }
     var whiteboard = true { didSet { needsDisplay = true } }
     var lineWidth: CGFloat = 4
     var fontSize: CGFloat = 26
+    var strokeColor = NSColor(srgbRed: 0.90, green: 0.12, blue: 0.16, alpha: 1)
+    var measurement: PixelMeasurement?
+    var measuring = false
+    var measurementChanged: ((String) -> Void)?
+    private let measurementLabel = NSTextField(wrappingLabelWithString: "")
     var marks: [Mark] = []
     var undoSteps: [[Mark]] = []
     var redoSteps: [[Mark]] = []
@@ -210,6 +254,55 @@ final class Canvas: NSView {
         bounds.fill()
         for mark in marks { mark.draw() }
         draft?.draw()
+        if let m = measurement {
+            let line = NSBezierPath()
+            line.move(to: m.start)
+            line.line(to: m.end)
+            line.lineCapStyle = .round
+            NSColor.black.withAlphaComponent(0.8).setStroke()
+            line.lineWidth = 5
+            line.stroke()
+            NSColor.white.setStroke()
+            line.lineWidth = 2
+            line.stroke()
+            for p in [m.start, m.end] {
+                NSColor.systemTeal.setFill()
+                NSBezierPath(ovalIn: NSRect(x: p.x - 4, y: p.y - 4, width: 8, height: 8)).fill()
+            }
+        }
+    }
+
+    func clearMeasurement() {
+        measurement = nil
+        measuring = false
+        measurementLabel.removeFromSuperview()
+        needsDisplay = true
+    }
+
+    func updateMeasurement(to point: CGPoint) {
+        guard var m = measurement else { return }
+        m.end = point
+        m.scale = window?.backingScaleFactor ?? m.scale
+        measurement = m
+        measurementLabel.stringValue = m.text
+        measurementLabel.font = .monospacedSystemFont(ofSize: 12, weight: .medium)
+        measurementLabel.appearance = NSAppearance(named: .darkAqua)
+        measurementLabel.textColor = .white
+        measurementLabel.drawsBackground = true
+        measurementLabel.backgroundColor = NSColor.black.withAlphaComponent(0.85)
+        measurementLabel.isSelectable = false
+        let width = min(330, bounds.width)
+        measurementLabel.frame = NSRect(x: max(0, min(point.x + 14, bounds.width - width)),
+                                        y: max(0, min(point.y + 18, bounds.height - 44)),
+                                        width: width, height: 44)
+        if measurementLabel.superview == nil { addSubview(measurementLabel) }
+        needsDisplay = true
+        measurementChanged?(m.text)
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let hit = super.hitTest(point)
+        return hit === measurementLabel ? self : hit
     }
 
     override func resetCursorRects() {
@@ -251,6 +344,7 @@ final class Canvas: NSView {
 
     func clear() {
         cancelText()
+        clearMeasurement()
         draft = nil
         guard !marks.isEmpty else { return }
         checkpoint()
@@ -265,15 +359,26 @@ final class Canvas: NSView {
         window?.makeFirstResponder(self)
         if editor != nil { commitText() }
         if tool == .pointer { return }
+        if tool == .ruler {
+            let p = point(event)
+            measurement = PixelMeasurement(start: p, end: p, scale: window?.backingScaleFactor ?? 1)
+            measuring = true
+            updateMeasurement(to: p)
+            return
+        }
         if tool == .text {
             beginText(at: point(event))
             return
         }
-        draft = Mark(tool: tool, points: [point(event)], width: lineWidth, color: red)
+        draft = Mark(tool: tool, points: [point(event)], width: lineWidth, color: strokeColor)
         needsDisplay = true
     }
 
     func moveDraft(_ event: NSEvent) {
+        if tool == .ruler {
+            if measuring { updateMeasurement(to: point(event)) }
+            return
+        }
         guard var shape = draft, let first = shape.points.first else { return }
         var p = point(event)
         if shape.tool == .pen {
@@ -300,6 +405,11 @@ final class Canvas: NSView {
     override func mouseDragged(with event: NSEvent) { moveDraft(event) }
 
     override func mouseUp(with event: NSEvent) {
+        if tool == .ruler {
+            if measuring { updateMeasurement(to: point(event)) }
+            measuring = false
+            return
+        }
         guard draft != nil else { return }
         moveDraft(event)
         if let shape = draft, let first = shape.points.first, let last = shape.points.last {
@@ -398,7 +508,7 @@ final class Canvas: NSView {
     }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTextFieldDelegate {
     var drawingWindow: DrawingWindow!
     var palette: NSPanel!
     var canvas: Canvas!
@@ -409,6 +519,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var redoButton: NSButton!
     var styleButton: PaletteButton!
     var stylePopover: NSPopover!
+    var strokeRGBFields: [NSTextField] = []
+    var colorMessage: NSTextField!
+    var rulerResult: NSTextField!
+    var sampleResult: NSTextField!
+    var copyRGBItem: NSMenuItem!
+    var useSampleItem: NSMenuItem!
+    var styleStack: NSStackView!
+    var advancedBody: NSStackView!
+    var toolsBody: NSStackView!
+    var advancedToggle: NSButton!
+    var toolsToggle: NSButton!
+    var sampleRow: NSStackView!
+    var colorPreview: ColorChipButton!
+    var presetButtons: [ColorChipButton] = []
+    var presetColors: [NSColor] { [canvas.red, .systemBlue, .systemGreen, .black, .white] }
+    var hexField: NSTextField!
+    var editingHex = false
+    var widthSlider: NSSlider!
+    var widthValue: NSTextField!
+    var strokePreview: StrokePreview!
+    var styleUndo: NSButton!
+    var styleRedo: NSButton!
+    var helpPanel: NSPanel!
+    var sampledColor: NSColor?
+    var sampledRGB: RGBValue?
+    var isSampling = false
+    private let colorSampler = NSColorSampler()
     var interactingWithDesktop = false
     var eventMonitor: Any?
 
@@ -432,6 +569,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         drawingWindow.contentView = canvas
         canvas.changed = { [weak self] in self?.updateButtons() }
         canvas.say = { [weak self] message in self?.showStatus(message) }
+        canvas.measurementChanged = { [weak self] text in self?.showMeasurement(text) }
         makePalette(visibleFrame: screen.visibleFrame)
         drawingWindow.makeKeyAndOrderFront(nil)
         drawingWindow.makeFirstResponder(canvas)
@@ -469,6 +607,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let viewMenu = NSMenu(title: "视图")
         viewMenu.addItem(withTitle: "切换白板 / 透明模式", action: #selector(toggleMode), keyEquivalent: "b")
         viewMenu.addItem(withTitle: "显示工具面板", action: #selector(showPalette), keyEquivalent: ",")
+        viewMenu.addItem(withTitle: "帮助与快捷键", action: #selector(showHelp), keyEquivalent: "/")
         viewItem.submenu = viewMenu
         menu.addItem(viewItem)
         NSApp.mainMenu = menu
@@ -489,6 +628,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         palette.level = NSWindow.Level(rawValue: NSWindow.Level.floating.rawValue + 1)
         palette.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
         palette.isFloatingPanel = true
+        palette.level = NSWindow.Level(rawValue: NSWindow.Level.floating.rawValue + 1)
         palette.hidesOnDeactivate = false
         palette.isReleasedWhenClosed = false
         let root = GlassSurface(frame: NSRect(origin: .zero, size: size))
@@ -556,9 +696,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         clear.setAccessibilityLabel("清空画布 C，不退出")
         addWide(clear, to: stack, height: 30)
 
-        styleButton = compactButton("样式", symbol: "slider.horizontal.3", key: "4/26",
+        styleButton = compactButton("样式和工具", symbol: "slider.horizontal.3",
                                     action: #selector(showStyles))
-        styleButton.setAccessibilityLabel("样式与快捷键说明")
+        styleButton.setAccessibilityLabel("样式和工具：颜色、线宽、字号、像素直尺、屏幕取色")
         addWide(styleButton, to: stack, height: 30)
         makeStylePopover()
         addSeparator(to: stack)
@@ -576,6 +716,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         root.layoutSubtreeIfNeeded()
         palette.setContentSize(NSSize(width: size.width, height: stack.fittingSize.height + 20))
         palette.setFrameTopLeftPoint(NSPoint(x: frame.minX, y: visibleFrame.maxY - 20))
+        updateWindowLevels()
         updateButtons()
     }
 
@@ -599,57 +740,437 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func makeStylePopover() {
         let controller = NSViewController()
-        controller.view = GlassSurface(frame: NSRect(x: 0, y: 0, width: 238, height: 276))
+        controller.view = GlassSurface(frame: NSRect(x: 0, y: 0, width: 300, height: 320))
         let stack = NSStackView()
+        styleStack = stack
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 10
+        stack.spacing = 16
         stack.translatesAutoresizingMaskIntoConstraints = false
         controller.view.addSubview(stack)
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: controller.view.leadingAnchor, constant: 16),
-            stack.trailingAnchor.constraint(equalTo: controller.view.trailingAnchor, constant: -16),
-            stack.topAnchor.constraint(equalTo: controller.view.topAnchor, constant: 16)
+            stack.leadingAnchor.constraint(equalTo: controller.view.leadingAnchor, constant: 18),
+            stack.trailingAnchor.constraint(equalTo: controller.view.trailingAnchor, constant: -18),
+            stack.topAnchor.constraint(equalTo: controller.view.topAnchor, constant: 18)
         ])
-        let heading = NSTextField(labelWithString: "样式")
+        let header = NSStackView()
+        let heading = NSTextField(labelWithString: "样式和工具")
         heading.font = .systemFont(ofSize: 14, weight: .semibold)
-        stack.addArrangedSubview(heading)
-        let widths = NSSegmentedControl(labels: ["细 2", "中 4", "粗 8"], trackingMode: .selectOne,
-                                        target: self, action: #selector(changeWidth(_:)))
-        widths.selectedSegment = 1
-        widths.setAccessibilityLabel("线条粗细")
-        addWide(widths, to: stack, height: 28)
-        let row = NSStackView()
-        row.distribution = .fillEqually
-        row.addArrangedSubview(NSTextField(labelWithString: "文字大小"))
+        header.addArrangedSubview(heading)
+        header.addArrangedSubview(NSView())
+        let help = NSButton(image: NSImage(systemSymbolName: "questionmark.circle", accessibilityDescription: "帮助")!,
+                            target: self, action: #selector(showHelp))
+        help.isBordered = false
+        help.toolTip = "帮助与快捷键（⌘/）"
+        help.setAccessibilityLabel("帮助与快捷键")
+        header.addArrangedSubview(help)
+        addWide(header, to: stack, height: 24)
+
+        let colors = NSStackView()
+        colors.spacing = 7
+        colors.addArrangedSubview(NSTextField(labelWithString: "颜色"))
+        colorPreview = ColorChipButton(title: "", target: self, action: #selector(openColorPanel))
+        colorPreview.color = canvas.strokeColor
+        colorPreview.setAccessibilityLabel("当前画笔颜色；点击打开调色盘")
+        colorPreview.toolTip = "选择画笔颜色，不改变已有笔迹或文字"
+        colorPreview.widthAnchor.constraint(equalToConstant: 36).isActive = true
+        colorPreview.heightAnchor.constraint(equalToConstant: 36).isActive = true
+        colors.addArrangedSubview(colorPreview)
+        colors.addArrangedSubview(NSView())
+        for (index, name) in ["红", "蓝", "绿", "黑", "白"].enumerated() {
+            let button = ColorChipButton(title: "", target: self, action: #selector(selectPreset(_:)))
+            button.tag = index
+            button.color = presetColors[index]
+            button.toolTip = name
+            button.setAccessibilityLabel("画笔颜色：" + name)
+            button.widthAnchor.constraint(equalToConstant: 25).isActive = true
+            button.heightAnchor.constraint(equalToConstant: 25).isActive = true
+            presetButtons.append(button)
+            colors.addArrangedSubview(button)
+        }
+        addWide(colors, to: stack, height: 36)
+        advancedToggle = disclosure("精确颜色", action: #selector(toggleAdvanced))
+        addWide(advancedToggle, to: stack, height: 18)
+        advancedBody = NSStackView()
+        advancedBody.orientation = .vertical
+        advancedBody.spacing = 8
+        let rgbRow = NSStackView()
+        rgbRow.spacing = 6
+        let rgb = RGBValue(canvas.strokeColor)!
+        for (index, name) in ["R", "G", "B"].enumerated() {
+            rgbRow.addArrangedSubview(NSTextField(labelWithString: name))
+            let field = NSTextField(string: String([rgb.r, rgb.g, rgb.b][index]))
+            field.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+            field.widthAnchor.constraint(equalToConstant: 53).isActive = true
+            field.target = self
+            field.action = #selector(applyRGB)
+            field.delegate = self
+            field.setAccessibilityLabel(name + "，0 到 255；回车应用")
+            strokeRGBFields.append(field)
+            rgbRow.addArrangedSubview(field)
+        }
+        addWide(rgbRow, to: advancedBody, height: 26)
+        let hexRow = NSStackView()
+        hexRow.addArrangedSubview(NSTextField(labelWithString: "HEX"))
+        hexField = NSTextField(string: rgb.hex)
+        hexField.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        hexField.target = self
+        hexField.action = #selector(applyHex)
+        hexField.delegate = self
+        hexField.setAccessibilityLabel("HEX 六位颜色；回车应用")
+        hexRow.addArrangedSubview(hexField)
+        let apply = smallButton("应用", action: #selector(applyExactColor))
+        apply.toolTip = "应用正在编辑的 RGB 或 HEX"
+        hexRow.addArrangedSubview(apply)
+        addWide(hexRow, to: advancedBody, height: 28)
+        colorMessage = NSTextField(labelWithString: "")
+        colorMessage.font = .systemFont(ofSize: 11)
+        colorMessage.textColor = .systemOrange
+        addWide(colorMessage, to: advancedBody)
+        colorMessage.isHidden = true
+        addWide(advancedBody, to: stack)
+        advancedBody.isHidden = true
+
+        let widthRow = NSStackView()
+        widthRow.spacing = 8
+        widthRow.addArrangedSubview(NSTextField(labelWithString: "粗细"))
+        widthSlider = NSSlider(value: Double(canvas.lineWidth), minValue: 1, maxValue: 12,
+                               target: self, action: #selector(changeWidthSlider(_:)))
+        widthSlider.isContinuous = true
+        widthSlider.setAccessibilityLabel("画笔粗细，1 到 12 点")
+        widthRow.addArrangedSubview(widthSlider)
+        strokePreview = StrokePreview(frame: .zero)
+        strokePreview.widthAnchor.constraint(equalToConstant: 36).isActive = true
+        strokePreview.heightAnchor.constraint(equalToConstant: 24).isActive = true
+        widthRow.addArrangedSubview(strokePreview)
+        widthValue = NSTextField(labelWithString: "4")
+        widthValue.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
+        widthValue.widthAnchor.constraint(equalToConstant: 18).isActive = true
+        widthRow.addArrangedSubview(widthValue)
+        addWide(widthRow, to: stack, height: 28)
+
+        let textRow = NSStackView()
+        textRow.spacing = 10
+        textRow.addArrangedSubview(NSTextField(labelWithString: "文字"))
+        let textColor = NSBox()
+        textColor.boxType = .custom
+        textColor.fillColor = canvas.red
+        textColor.borderWidth = 0
+        textColor.cornerRadius = 4
+        textColor.widthAnchor.constraint(equalToConstant: 8).isActive = true
+        textColor.heightAnchor.constraint(equalToConstant: 8).isActive = true
+        textColor.toolTip = "文字默认红色，画笔调色不影响文字"
+        textRow.addArrangedSubview(textColor)
+        textRow.addArrangedSubview(NSView())
         let sizes = NSPopUpButton()
         sizes.addItems(withTitles: ["18 pt", "26 pt", "36 pt", "48 pt", "64 pt"])
         sizes.selectItem(at: 1)
         sizes.target = self
         sizes.action = #selector(changeFont(_:))
-        sizes.setAccessibilityLabel("文字大小")
-        row.addArrangedSubview(sizes)
-        addWide(row, to: stack, height: 28)
-        let font = NSTextField(labelWithString: "红色 · 等宽无衬线")
-        font.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
-        font.textColor = canvas.red
-        stack.addArrangedSubview(font)
+        sizes.setAccessibilityLabel("文字字号")
+        sizes.widthAnchor.constraint(equalToConstant: 110).isActive = true
+        textRow.addArrangedSubview(sizes)
+        addWide(textRow, to: stack, height: 28)
+
+        toolsToggle = disclosure("更多工具", action: #selector(toggleTools))
+        addWide(toolsToggle, to: stack, height: 24)
+        toolsBody = NSStackView()
+        toolsBody.orientation = .vertical
+        toolsBody.spacing = 10
+        let toolRow = NSStackView()
+        toolRow.distribution = .fillEqually
+        toolRow.spacing = 8
+        let ruler = smallButton("直尺", action: #selector(startRuler))
+        ruler.image = NSImage(systemSymbolName: "ruler", accessibilityDescription: nil)
+        ruler.imagePosition = .imageLeading
+        ruler.toolTip = "拖动测量渲染像素距离；Esc 取消"
+        let sampler = smallButton("吸色", action: #selector(sampleScreenColor))
+        sampler.image = NSImage(systemSymbolName: "eyedropper", accessibilityDescription: nil)
+        sampler.imagePosition = .imageLeading
+        sampler.toolTip = "系统放大镜取色；单击后显示 RGB，Esc 取消"
+        toolRow.addArrangedSubview(ruler)
+        toolRow.addArrangedSubview(sampler)
+        addWide(toolRow, to: toolsBody, height: 30)
+        rulerResult = NSTextField(wrappingLabelWithString: "")
+        rulerResult.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        rulerResult.isSelectable = true
+        rulerResult.isHidden = true
+        addWide(rulerResult, to: toolsBody, height: 36)
+        sampleRow = NSStackView()
+        sampleRow.spacing = 6
+        sampleResult = NSTextField(labelWithString: "")
+        sampleResult.font = .monospacedSystemFont(ofSize: 11, weight: .medium)
+        sampleResult.isSelectable = true
+        sampleRow.addArrangedSubview(sampleResult)
+        sampleRow.addArrangedSubview(NSView())
+        let actions = NSPopUpButton(frame: .zero, pullsDown: true)
+        actions.addItem(withTitle: "•••")
+        copyRGBItem = NSMenuItem(title: "复制 RGB", action: #selector(copyRGB), keyEquivalent: "")
+        useSampleItem = NSMenuItem(title: "用于画笔", action: #selector(useSampleColor), keyEquivalent: "")
+        for item in [copyRGBItem!, useSampleItem!] { item.target = self; actions.menu?.addItem(item) }
+        actions.menu?.autoenablesItems = false
+        copyRGBItem.isEnabled = false
+        useSampleItem.isEnabled = false
+        actions.setAccessibilityLabel("取色结果操作")
+        sampleRow.addArrangedSubview(actions)
+        addWide(sampleRow, to: toolsBody, height: 28)
+        sampleRow.isHidden = true
+        addWide(toolsBody, to: stack)
+        toolsBody.isHidden = true
         addSeparator(to: stack)
-        let help = NSTextField(wrappingLabelWithString:
-            "C 清空 · X 清空并退出\nShift：正方形 / 约束直线\n⌘Z 撤销 · ⌘⇧Z 重做\nEnter 换行 · ⌘Enter 完成文字\nEsc 取消文字\n\n快捷键仅在白板处于前台时生效。透明模式选 V，可操作下方应用。")
-        help.font = .systemFont(ofSize: 12)
-        help.textColor = .secondaryLabelColor
-        addWide(help, to: stack)
-        controller.view.layoutSubtreeIfNeeded()
+
+        let footer = NSStackView()
+        footer.distribution = .fillEqually
+        footer.spacing = 6
+        styleUndo = smallButton("撤销", action: #selector(undoDrawing))
+        styleRedo = smallButton("重做", action: #selector(redoDrawing))
+        footer.addArrangedSubview(styleUndo)
+        footer.addArrangedSubview(styleRedo)
+        footer.addArrangedSubview(smallButton("清空", action: #selector(clearDrawing)))
+        addWide(footer, to: stack, height: 28)
         stylePopover = NSPopover()
         stylePopover.appearance = NSAppearance(named: .darkAqua)
         stylePopover.behavior = .transient
         stylePopover.contentViewController = controller
-        stylePopover.contentSize = NSSize(width: 238, height: stack.fittingSize.height + 32)
+        refreshStyleSize()
+        syncColorControls()
+    }
+
+    func smallButton(_ title: String, action: Selector) -> NSButton {
+        let button = NSButton(title: title, target: self, action: action)
+        button.bezelStyle = .rounded
+        button.controlSize = .regular
+        return button
+    }
+
+    func disclosure(_ title: String, action: Selector) -> NSButton {
+        let button = NSButton(title: "› " + title, target: self, action: action)
+        button.isBordered = false
+        button.alignment = .left
+        button.font = .systemFont(ofSize: 12)
+        button.contentTintColor = .secondaryLabelColor
+        button.setAccessibilityLabel(title + "，展开或收起")
+        return button
+    }
+
+    func refreshStyleSize() {
+        guard let root = stylePopover?.contentViewController?.view, let styleStack else { return }
+        root.layoutSubtreeIfNeeded()
+        let size = NSSize(width: 300, height: styleStack.fittingSize.height + 36)
+        stylePopover.contentSize = size
+        root.setFrameSize(size)
+        root.layoutSubtreeIfNeeded()
+    }
+
+    @objc func toggleAdvanced() {
+        advancedBody.isHidden.toggle()
+        advancedToggle.title = (advancedBody.isHidden ? "› " : "⌄ ") + "精确颜色"
+        refreshStyleSize()
+    }
+
+    @objc func toggleTools() {
+        toolsBody.isHidden.toggle()
+        toolsToggle.title = (toolsBody.isHidden ? "› " : "⌄ ") + "更多工具"
+        refreshStyleSize()
+    }
+
+    func showMeasurement(_ text: String) {
+        rulerResult.stringValue = text
+        rulerResult.isHidden = false
+        if stylePopover.isShown { refreshStyleSize() }
+    }
+
+    func syncColorControls() {
+        guard let rgb = RGBValue(canvas.strokeColor) else { return }
+        colorPreview?.color = canvas.strokeColor
+        colorPreview?.setAccessibilityLabel("当前画笔颜色 " + rgb.hex + "；点击打开调色盘")
+        hexField?.stringValue = rgb.hex
+        strokePreview?.color = canvas.strokeColor
+        for button in presetButtons { button.selected = RGBValue(button.color) == rgb }
+    }
+
+    @objc func openColorPanel() {
+        stylePopover.performClose(nil)
+        let panel = NSColorPanel.shared
+        panel.color = canvas.strokeColor
+        panel.showsAlpha = false
+        panel.isContinuous = true
+        panel.setTarget(self)
+        panel.setAction(#selector(changeColorPanel(_:)))
+        panel.appearance = NSAppearance(named: .darkAqua)
+        panel.isFloatingPanel = true
+        panel.level = NSWindow.Level(rawValue: palette.level.rawValue + 1)
+        panel.makeKeyAndOrderFront(nil)
+    }
+
+    @objc func changeColorPanel(_ sender: NSColorPanel) { setStrokeColor(sender.color) }
+
+    @objc func applyExactColor() {
+        if editingHex { applyHex() } else { applyRGB() }
+    }
+
+    func controlTextDidBeginEditing(_ notification: Notification) {
+        editingHex = notification.object as? NSTextField === hexField
+    }
+
+    @objc func applyHex() {
+        var text = hexField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if text.hasPrefix("#") { text.removeFirst() }
+        guard text.count == 6, text.allSatisfy({ $0.isHexDigit }), let value = UInt32(text, radix: 16) else {
+            colorMessage.stringValue = "请输入六位 HEX"
+            colorMessage.isHidden = false
+            refreshStyleSize()
+            return
+        }
+        setStrokeColor(NSColor(srgbRed: CGFloat((value >> 16) & 255) / 255,
+                               green: CGFloat((value >> 8) & 255) / 255,
+                               blue: CGFloat(value & 255) / 255, alpha: 1))
+    }
+
+    @objc func changeWidthSlider(_ sender: NSSlider) {
+        canvas.lineWidth = CGFloat(sender.doubleValue.rounded())
+        sender.doubleValue = Double(canvas.lineWidth)
+        updateButtons()
+    }
+
+    @objc func showHelp() {
+        stylePopover.performClose(nil)
+        if helpPanel == nil {
+            let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 360, height: 520),
+                                styleMask: [.titled, .closable, .utilityWindow], backing: .buffered, defer: false)
+            panel.title = "帮助与快捷键"
+            panel.isReleasedWhenClosed = false
+            panel.hidesOnDeactivate = true
+            panel.appearance = NSAppearance(named: .darkAqua)
+            let view = GlassSurface(frame: NSRect(x: 0, y: 0, width: 360, height: 520))
+            panel.contentView = view
+            let text = NSTextField(wrappingLabelWithString:
+                "A 画笔 · Q 直线 · W 方形 · T 文字 · V 选择\nZ 贴文字 · C 清空 · X 清空并退出\n⌘Z 撤销 · ⌘⇧Z 重做 · ⌘/ 帮助\nShift 约束形状 · ⌘↩ 完成文字 · Esc 取消\n\n颜色\n画笔调色不改变旧笔迹或红色文字。精确颜色中可输入 RGB / HEX，回车应用。\n\n直尺\n拖动测量距离，px 是渲染像素（逻辑点 × 屏幕倍率），不是网页 CSS px。\n\n吸色\n使用系统放大镜，单击确认后显示 RGB，Esc 取消。结果菜单可复制 RGB 或用于画笔，悬停读数查看 HEX。无需屏幕录制权限，不保存截图。原生接口不提供移动时的实时 RGB。\n\n快捷键仅前台生效；输入文字时字母正常输入。")
+            text.font = .systemFont(ofSize: 12)
+            text.frame = NSRect(x: 20, y: 18, width: 320, height: 484)
+            view.addSubview(text)
+            helpPanel = panel
+        }
+        helpPanel.level = NSWindow.Level(rawValue: palette.level.rawValue + 1)
+        helpPanel.center()
+        helpPanel.makeKeyAndOrderFront(nil)
+    }
+
+    func setStrokeColor(_ color: NSColor) {
+        guard let rgb = RGBValue(color) else { return }
+        canvas.strokeColor = NSColor(srgbRed: CGFloat(rgb.r) / 255, green: CGFloat(rgb.g) / 255,
+                                    blue: CGFloat(rgb.b) / 255, alpha: 1)
+        for (field, value) in zip(strokeRGBFields, [rgb.r, rgb.g, rgb.b]) { field.stringValue = String(value) }
+        colorMessage.stringValue = ""
+        colorMessage.isHidden = true
+        syncColorControls()
+        refreshStyleSize()
+        updateButtons()
+    }
+
+    @objc func applyRGB() {
+        let values = strokeRGBFields.compactMap { Int($0.stringValue.trimmingCharacters(in: .whitespaces)) }
+        guard values.count == 3, values.allSatisfy({ (0...255).contains($0) }) else {
+            colorMessage.stringValue = "请输入 0–255 的整数，颜色未更改"
+            colorMessage.isHidden = false
+            refreshStyleSize()
+            return
+        }
+        setStrokeColor(NSColor(srgbRed: CGFloat(values[0]) / 255, green: CGFloat(values[1]) / 255,
+                               blue: CGFloat(values[2]) / 255, alpha: 1))
+    }
+
+    @objc func selectPreset(_ sender: NSButton) {
+        let colors: [NSColor] = [canvas.red, .systemBlue, .systemGreen, .black, .white]
+        guard colors.indices.contains(sender.tag) else { return }
+        setStrokeColor(colors[sender.tag])
+    }
+
+    @objc func startRuler() {
+        stylePopover.performClose(nil)
+        select(.ruler)
+    }
+
+    @discardableResult func recordSample(_ color: NSColor?) -> Bool {
+        guard let color, let rgb = RGBValue(color) else { return false }
+        sampledColor = color
+        sampledRGB = rgb
+        sampleResult.stringValue = rgb.text
+        sampleResult.toolTip = rgb.hex
+        sampleRow.isHidden = false
+        copyRGBItem.isEnabled = true
+        useSampleItem.isEnabled = true
+        refreshStyleSize()
+        return true
+    }
+
+    @objc func copyRGB() {
+        guard let rgb = sampledRGB else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(rgb.text, forType: .string)
+    }
+
+    @objc func useSampleColor() {
+        guard let color = sampledColor else { return }
+        setStrokeColor(color)
+    }
+
+    @objc func sampleScreenColor() {
+        guard !isSampling else { return }
+        let wasVisible = prepareSampling()
+        colorSampler.show { [weak self] color in
+            self?.restoreAfterSampling(color, canvasWasVisible: wasVisible)
+        }
+    }
+
+    func prepareSampling() -> Bool {
+        canvas.commitText()
+        canvas.draft = nil
+        canvas.measuring = false
+        let canvasWasVisible = drawingWindow.isVisible
+        isSampling = true
+        stylePopover.performClose(nil)
+        helpPanel?.orderOut(nil)
+        if NSColorPanel.sharedColorPanelExists { NSColorPanel.shared.orderOut(nil) }
+        drawingWindow.orderOut(nil)
+        palette.orderOut(nil)
+        return canvasWasVisible
+    }
+
+    func restoreAfterSampling(_ color: NSColor?, canvasWasVisible: Bool) {
+        isSampling = false
+        recordSample(color)
+        toolsBody.isHidden = false
+        toolsToggle.title = "⌄ 更多工具"
+        if NSApp.isActive {
+            if canvasWasVisible { drawingWindow.orderFrontRegardless() }
+            showStyles()
+        } else {
+            if interactingWithDesktop && canvasWasVisible { drawingWindow.orderFrontRegardless() }
+            keepPaletteVisible()
+        }
+    }
+
+    func updateWindowLevels() {
+        guard let drawingWindow, let palette else { return }
+        // isFloatingPanel can reset a panel's level: set the explicit level last.
+        drawingWindow.level = canvas.whiteboard ? .normal : .floating
+        palette.level = NSWindow.Level(rawValue: NSWindow.Level.floating.rawValue + 1)
+    }
+
+    func keepPaletteVisible() {
+        guard !isSampling, let palette else { return }
+        updateWindowLevels()
+        palette.orderFrontRegardless()
+    }
+
+    func windowDidBecomeKey(_ notification: Notification) {
+        if notification.object as? NSWindow === drawingWindow { keepPaletteVisible() }
     }
 
     @objc func showStyles() {
         if stylePopover.isShown { stylePopover.performClose(nil); return }
+        refreshStyleSize()
         showPalette()
         stylePopover.show(relativeTo: styleButton.bounds, of: styleButton, preferredEdge: .maxX)
     }
@@ -673,6 +1194,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func focusCanvas() {
+        guard !isSampling else { return }
         if canvas.tool == .pointer && !canvas.whiteboard {
             setDesktopInteraction(true)
             NSApp.activate(ignoringOtherApps: true)
@@ -683,6 +1205,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NSApp.activate(ignoringOtherApps: true)
         drawingWindow.makeKeyAndOrderFront(nil)
         drawingWindow.makeFirstResponder(canvas)
+        keepPaletteVisible()
     }
 
     func updateButtons() {
@@ -692,9 +1215,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         undoButton?.isEnabled = !canvas.undoSteps.isEmpty
         redoButton?.isEnabled = !canvas.redoSteps.isEmpty
-        styleButton?.keyHint = "\(Int(canvas.lineWidth))/\(Int(canvas.fontSize))"
-        styleButton?.toolTip = "样式：线宽 \(Int(canvas.lineWidth)) pt / 字号 \(Int(canvas.fontSize)) pt；点击设置及查看快捷键"
-        styleButton?.setAccessibilityLabel("样式：线宽 \(Int(canvas.lineWidth))，字号 \(Int(canvas.fontSize))。点击展开")
+        styleUndo?.isEnabled = !canvas.undoSteps.isEmpty
+        styleRedo?.isEnabled = !canvas.redoSteps.isEmpty
+        widthSlider?.doubleValue = Double(canvas.lineWidth)
+        widthValue?.stringValue = "\(Int(canvas.lineWidth))"
+        strokePreview?.width = canvas.lineWidth
+        styleButton?.toolTip = "样式和工具：颜色、线宽 \(Int(canvas.lineWidth)) pt、字号 \(Int(canvas.fontSize)) pt、像素直尺、RGB 取色"
+        styleButton?.setAccessibilityLabel("样式和工具：颜色、线宽、字号、像素直尺、RGB 取色")
         styleButton?.needsDisplay = true
     }
 
@@ -718,6 +1245,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         else { setDesktopInteraction(true) }
     }
     func setDesktopInteraction(_ enabled: Bool) {
+        updateWindowLevels()
         interactingWithDesktop = enabled && !canvas.whiteboard
         drawingWindow.ignoresMouseEvents = interactingWithDesktop
         palette.hidesOnDeactivate = false
@@ -737,6 +1265,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         changeMode()
     }
     @objc func showPalette() {
+        guard !isSampling else { return }
+        updateWindowLevels()
         NSApp.activate(ignoringOtherApps: true)
         palette.makeKeyAndOrderFront(nil)
     }
@@ -774,11 +1304,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NSApp.orderFrontStandardAboutPanel(options: [
             .applicationName: "简笔白板",
             .applicationVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "",
-            .credits: NSAttributedString(string: "画笔 · 直线 · 方形 · 红色等宽文字\nZ 粘贴文字，C 清空，X 清空并退出。\n本地运行，无联网、录屏或辅助功能权限要求。")
+            .credits: NSAttributedString(string: "画笔 · 直线 · 方形 · 红色等宽文字\nZ 粘贴文字，C 清空，X 清空并退出。\n本地运行，无联网、录屏或辅助功能权限要求。\n吸色使用系统放大镜，仅返回选定颜色，不保存截图。")
         ])
     }
 
     func handleKey(_ event: NSEvent) -> NSEvent? {
+        guard !isSampling else { return event }
         guard NSApp.keyWindow === drawingWindow || NSApp.keyWindow === palette else { return event }
         // Text responders retain normal letters, cut/paste, undo, and IME composition.
         if NSApp.keyWindow?.firstResponder is NSTextView { return event }
@@ -792,6 +1323,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return event
         }
         if mods.contains(.option) || mods.contains(.control) { return event }
+        if event.characters == "?" { showHelp(); return nil }
         if event.isARepeat { return event }
         switch event.keyCode {
         case 8: clearDrawing(); return nil // C; text input and Cmd-C are handled above.
@@ -802,37 +1334,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         case 13: select(.rectangle); return nil // W
         case 17: select(.text); return nil
         case 9: select(.pointer); return nil
-        case 53: canvas.draft = nil; canvas.needsDisplay = true; return nil
+        case 53: canvas.draft = nil; canvas.clearMeasurement(); canvas.needsDisplay = true; return nil
         default: return event
         }
     }
 
     func applicationDidResignActive(_ notification: Notification) {
+        guard !isSampling else { return }
         // Switching apps restores normal desktop interaction without losing drawings.
         canvas.draft = nil
+        canvas.measuring = false
         if interactingWithDesktop { return }
         drawingWindow.orderOut(nil)
     }
     func applicationDidBecomeActive(_ notification: Notification) {
-        guard drawingWindow != nil else { return }
+        guard drawingWindow != nil, palette != nil, !isSampling else { return }
+        updateWindowLevels()
         if interactingWithDesktop {
             drawingWindow.orderFrontRegardless()
             palette.orderFrontRegardless()
             return
         }
         drawingWindow.makeKeyAndOrderFront(nil)
-        palette.orderFrontRegardless()
+        keepPaletteVisible()
         drawingWindow.makeFirstResponder(canvas.editor ?? canvas)
     }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if isSampling { return true }
         focusCanvas()
         palette.orderFrontRegardless()
         return true
     }
     @objc func screenChanged() {
+        if isSampling { return }
         guard let screen = drawingWindow.screen ?? NSScreen.main else { return }
         drawingWindow.setFrame(screen.visibleFrame, display: true)
         palette.setFrameTopLeftPoint(NSPoint(x: screen.visibleFrame.minX + 20, y: screen.visibleFrame.maxY - 24))
+        canvas.clearMeasurement()
+        keepPaletteVisible()
     }
     func applicationWillTerminate(_ notification: Notification) {
         if let eventMonitor { NSEvent.removeMonitor(eventMonitor) }
