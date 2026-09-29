@@ -87,4 +87,6 @@ CHANGELOG.md  版本记录
 
 ## 许可证
 
-许可证待维护者确认；正式公开发布前必须补充 `LICENSE` 并更新本节。目前不授予开源使用许可。
+本项目采用 [MIT License](LICENSE)，Copyright (c) 2026 MeowFTG。
+
+仓库中的应用代码、文档、原创图标及其绘图源码均按 MIT 许可证提供。应用内使用的系统 SF Symbols 不属于本项目的授权范围，适用 Apple 自身条款。
