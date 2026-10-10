@@ -1,6 +1,6 @@
 <p align="center"><img src="assets/AppIcon.png" width="160" alt="简笔白板图标"></p>
 
-# 简笔白板 · SimpleBoard
+# 简笔白板 ｜ SimpleBoard
 
 一个轻量的 macOS 白板与桌面批注工具。菜单栏常驻，屏幕边缘随手呼出，用完收起。深色磨砂玻璃工具栏，可调色画笔和红色等宽文字；不登录、不联网，不申请屏幕录制权限。
 
