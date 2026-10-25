@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleName</key><string>简笔白板</string>
+  <key>CFBundleDisplayName</key><string>简笔白板</string>
+  <key>CFBundleIdentifier</key><string>local.simpleboard.mac</string>
+  <key>CFBundleExecutable</key><string>SimpleBoard</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>1.9.0</string>
+  <key>CFBundleVersion</key><string>15</string>
+  <key>NSScreenCaptureUsageDescription</key><string>仅在用户框选配对时读取一次选区以匹配颜色，不持续录制、不保存截图、不上传。</string>
+  <key>LSUIElement</key><true/>
+  <key>LSMinimumSystemVersion</key><string>13.0</string>
+  <key>NSHighResolutionCapable</key><true/>
+  <key>NSPrincipalClass</key><string>NSApplication</string>
+  <key>NSHumanReadableCopyright</key><string>Copyright © 2026 MeowFTG. MIT License.</string>
+</dict></plist>
